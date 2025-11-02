@@ -16,11 +16,10 @@
 # 3) 예측성능: Horizon별 MAE/R2 요약
 # 4) 액션아이템: 3~5개 (CAPA 재배분, 로트/안전재고 조정 등)
 # 5) 리스크/가정: 데이터 품질/제약 가정 간단 표기
-# """)
 
 """
 
-CLI - 단일 플랜 (하위호환)
+CLI - 단일 플랜
 python -m src.report_llm \
   --plan ./outputs/outputs/production_plan.csv \
   --forecast ./outputs/outputs/pred_final.csv \
@@ -64,24 +63,21 @@ def _pick(cols_map: Dict[str, str], cands: List[str]) -> Optional[str]:
     keys = list(cols_map.keys())
     lcands = [c.lower() for c in cands]
 
-    # 1) 정확 일치
+
     for c in lcands:
         for k in keys:
             if k == c:
                 return cols_map[k]
 
-    # 2) 단어 경계 일치
     for c in lcands:
         pat = re.compile(rf"\b{re.escape(c)}\b")
         for k in keys:
             if pat.search(k):
                 return cols_map[k]
 
-    # 3) 부분문자열 (오인방지: product_number 등 제외)
     for c in lcands:
         for k in keys:
             if c in k:
-                # 'prod'가 'product_number'에 매칭되는 오인 방지
                 if c in {"prod"} and "product_number" in k:
                     continue
                 return cols_map[k]
@@ -163,18 +159,16 @@ def summarize_by_product(plan_csv: str, product_col_candidates=("product_number"
     df = _dedup_columns(df)
     cols = {c.lower(): c for c in df.columns}
 
-    # 컬럼 매핑 (오인 방지: 생산량에서 'prod' 제외)
     col_prodname = _pick(cols, list(product_col_candidates))                     # 제품 식별자
     col_prodqty  = _pick(cols, ["produce","production","생산"])                  # 생산량
     col_dem      = _pick(cols, ["demand","수요"])                                # 수요
     col_back     = _pick(cols, ["backlog","백로그"])                             # 백로그
-    col_inv      = _pick(cols, ["end_inventory","inventory","inv","재고"])  
-         # 재고
+    col_inv      = _pick(cols, ["end_inventory","inventory","inv","재고"])      # 재고
+         
     print("[DEBUG] plan(by_product) columns:", list(df.columns))
     print("[DEBUG] picked(by_product) -> product:", col_prodname,
           "/ qty:", col_prodqty, "/ demand:", col_dem,
           "/ back:", col_back, "/ inv:", col_inv)
-    # 필수 스키마 검사 (이 시점에선 grp 참조 금지!)
     required = [col_prodname, col_prodqty, col_dem]
     if any(x is None for x in required):
         return {
@@ -187,30 +181,25 @@ def summarize_by_product(plan_csv: str, product_col_candidates=("product_number"
             }
         }
 
-    # 숫자형 보정
     for c in [col_prodqty, col_dem, col_back, col_inv]:
         if c and c in df.columns and not pd.api.types.is_numeric_dtype(df[c]):
-            # 천단위 콤마 등 제거 후 변환
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce")
 
-    # 그룹 집계 (여기서부터 grp 사용 가능)
+    # 그룹 집계
     agg_dict = {col_prodqty: "sum", col_dem: "sum"}
     if col_back: agg_dict[col_back] = "sum"
     if col_inv:  agg_dict[col_inv]  = "sum"
 
     grp = df.groupby(col_prodname, dropna=False, as_index=False).agg(agg_dict)
 
-    # 표준 컬럼명으로 rename
     rename_map = {col_prodname: "Product_Number", col_prodqty: "produce", col_dem: "demand"}
     if col_back: rename_map[col_back] = "backlog"
     if col_inv:  rename_map[col_inv]  = "end_inventory"
     grp = grp.rename(columns=rename_map)
 
-    # 제품코드는 문자열로 캐스팅 (float 0.0 표시 방지) — grp가 생긴 후에만!
     if "Product_Number" in grp.columns:
         grp["Product_Number"] = grp["Product_Number"].astype(str)
 
-    # 누락 컬럼 기본값
     if "backlog" not in grp.columns:
         grp["backlog"] = 0.0
     if "end_inventory" not in grp.columns:
@@ -226,7 +215,6 @@ def summarize_by_product(plan_csv: str, product_col_candidates=("product_number"
     top_backlog = top_backlog_df[safe_cols_back].to_dict(orient="records")
 
     # Top 5 — 과다 생산(재고 상위; 재고가 모두 0이면 (produce - demand)+)
-    # 안전 숫자형 보정
     for c in ["produce", "demand", "end_inventory"]:
         if c in grp.columns and not pd.api.types.is_numeric_dtype(grp[c]):
             grp[c] = pd.to_numeric(grp[c], errors="coerce")
@@ -451,15 +439,12 @@ def summarize_cluster_kpi(plan_csv: str, feat_csv: str) -> dict:
     plan[key_plan] = plan[key_plan].astype(str)
     feat[key_feat] = feat[key_feat].astype(str)
 
-    # 필요한 숫자 컬럼 숫자화
     for c in ["produce", "end_inventory", "backlog", "capa"]:
         if c in plan.columns and not pd.api.types.is_numeric_dtype(plan[c]):
             plan[c] = pd.to_numeric(plan[c].astype(str).str.replace(",", ""), errors="coerce")
 
-    # 머지
     merged = plan.merge(feat[[key_feat, cl_col]], left_on=key_plan, right_on=key_feat, how="left")
 
-    # cluster 정리
     merged[cl_col] = pd.to_numeric(merged[cl_col], errors="coerce")
     merged = merged[~merged[cl_col].isna()].copy()
     merged[cl_col] = merged[cl_col].astype(int)
@@ -501,7 +486,6 @@ def _pareto_frontier(items: List[Dict]) -> List[int]:
         for j, b in enumerate(items):
             if i == j or j in dominated:
                 continue
-            # b가 a를 엄격히 지배하는지(모두 <=, 하나는 <)
             conds = [
                 b["backlog"] <= a["backlog"] if a["backlog"] is not None and b["backlog"] is not None else False,
                 b["variability"] <= a["variability"] if a["variability"] is not None and b["variability"] is not None else False,
@@ -613,14 +597,16 @@ SYS_PROMPT = (
     "Summarize supply-chain production plan and forecasting quality for a weekly executive report.\n"
     "Be concise, numeric, and actionable. Use bullet points, Korean language.\n"
     "First output ONLY JSON with the exact schema, then after a line with '---', output a Markdown block.\n"
+    "**In the Markdown block, you MUST include an '행동 계획' section with 3-5 items.**\n"
 )
 
 USER_TASK = """다음의 '사전 정량 요약(Facts)'은 CSV에서 직접 계산된 사실입니다.
 반드시 Facts의 수치를 **그대로 복사하여** 사용하세요. 추론/보정/생략 금지.
 총 생산량, 총 백로그, 총 재고, 평균 일일 CAPA 등 핵심 KPI는 Facts에서 제공되는 값을 **그대로** 사용하세요.
 제품별 Top5는 반드시 Facts.product_summary의 값을 그대로 사용하세요(제품명/숫자 그대로).
-추가로 cluster_summary가 제공됩니다. 이는 생산량/백로그/재고를 클러스터(0~3) 단위로 집계한 내용이며, cluster별 KPI를 표 형태로 포함하고 간단히 해석하세요.
-또한 cluster_summary가 제공되면 클러스터(0~3)별 KPI 표를 포함하고 간단히 해석하세요.
+추가로 cluster_summary는 생산량/백로그/재고를 클러스터(0~3) 단위로 집계한 내용입니다.
+**또한 cluster_summary가 제공되면 클러스터(0~3)별 KPI 표를 포함하고 간단히 해석하세요.**
+Markdown 보고서에는 반드시 '행동 계획' 섹션(3-5개)을 포함하세요. 
 
 [금지사항]
 - Facts에 양(+)의 값이 있는데 0 또는 N/A로 표기하는 행위 금지
@@ -765,7 +751,7 @@ def _render_canonical_md(facts: dict) -> str:
         except Exception:
             return str(x)
 
-    md = []  # ✅ 항상 맨 처음에 초기화
+    md = []  
 
     # 대표 시나리오 요약
     rep = facts.get("plan_summary_rep") or {}
@@ -792,6 +778,9 @@ def _render_canonical_md(facts: dict) -> str:
     if total_capa:
         md.append(f"  - 총 CAPA(합계): { _fmt(total_capa, 1) }")
     md.append("")
+    md.append("### 행동 계획 (정량 기반)")
+    for act in facts.get("rule_based_actions", []):
+        md.append(f"- {act}")
 
     # 제품 Top5 (FACTS 그대로)
     ps = facts.get("product_summary") or {}
@@ -850,7 +839,6 @@ def _render_canonical_md(facts: dict) -> str:
             md.append(f"  | {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |")
         md.append("")
 
-    # ✅ 클러스터 표 (여기서만 pandas 사용, 실패해도 md는 이미 존재)
     cluster = facts.get("cluster_summary") or {}
     if cluster and not cluster.get("missing") and not cluster.get("schema_error"):
         try:
@@ -876,7 +864,6 @@ def _enforce_facts_on_json(js: dict, facts: dict) -> dict:
 
     rep = (facts.get("plan_summary_rep") or {})
     totals = rep.get("totals") or {}
-    # summary 숫자 강제
     js.setdefault("summary", {})
     for k_fact, k_js in [
         ("total_production", "total_production"),
@@ -888,7 +875,6 @@ def _enforce_facts_on_json(js: dict, facts: dict) -> dict:
         if v is not None:
             js["summary"][k_js] = v
 
-    # period 복사
     period = rep.get("period") or {}
     if "period_min" in js.get("summary", {}):
         js["summary"]["period_min"] = period.get("min")
@@ -899,17 +885,14 @@ def _enforce_facts_on_json(js: dict, facts: dict) -> dict:
     else:
         js["summary"].setdefault("period_max", period.get("max"))
 
-    # Top5 강제 (product_summary에서 그대로 복사)
     ps = facts.get("product_summary") or {}
     inc = ps.get("top_backlog") or []
     over = ps.get("top_overprod") or []
     js.setdefault("top5", {})
-    # increase_needed: [{"product":..., "sum_backlog":...}]
     js["top5"]["increase_needed"] = [
         {"product": d.get("Product_Number"), "sum_backlog": d.get("backlog", d.get("sum_backlog"))}
         for d in inc
     ]
-    # overproduction: [{"product":..., "score":...}]
     js["top5"]["overproduction"] = [
         {"product": d.get("Product_Number"), "score": d.get("over_score")}
         for d in over
@@ -932,6 +915,70 @@ def _enforce_facts_on_json(js: dict, facts: dict) -> dict:
     js.setdefault("scenario_compare", {})
     js["scenario_compare"]["table"] = table
     return js
+
+def generate_rule_based_actions(facts: dict) -> List[str]:
+    """
+    정량지표 기반 행동 계획 자동 생성.
+    Facts에는 plan_summary_rep, product_summary, metrics_summary 등이 포함됨.
+    """
+    actions = []
+    plan = facts.get("plan_summary_rep", {}).get("timeline", {})
+    totals = facts.get("plan_summary_rep", {}).get("totals", {})
+    product_sum = facts.get("product_summary", {})
+
+    avg_util = plan.get("avg_utilization")
+    prod_var = plan.get("production_variability")
+    total_backlog = totals.get("total_backlog", 0.0)
+    total_inv = totals.get("total_inventory", 0.0)
+
+    # --- 1. 라인 가동률 저조 ---
+    if avg_util is not None and avg_util < 0.8:
+        actions.append("라인 가동률 제고를 위해 CAPA 재배분 또는 잔업 계획 검토")
+
+    # --- 2. Top5 backlog 집중도 ---
+    if product_sum and not product_sum.get("missing"):
+        top5 = product_sum.get("top_backlog", [])
+        if top5 and total_backlog:
+            ratio = sum(item.get("backlog", 0) for item in top5) / total_backlog
+            if ratio > 0.6:
+                actions.append("상위 소수 품목에 대한 집중 생산 전략 수립")
+
+    # --- 3. 생산 변동성 ---
+    if prod_var is not None and prod_var > 500:  # θ=500 예시값
+        actions.append("일별 생산 변동성을 완화하기 위한 생산 스무딩/캠페인 조정")
+
+    # --- 4. 과잉 재고 ---
+    if total_inv > 10000:  # 임계치 예시 (데이터 규모에 따라 조정)
+        actions.append("과잉 재고 감축 및 프로모션 전략 검토")
+
+    # --- 5. 기본 fallback ---
+    if not actions:
+        actions.append("주요 지표 이상 없음 — 계획 유지 및 예측 모니터링 지속")
+
+    return actions
+
+def _autoresolve_feat_path(feat_csv: str, plan_path: Optional[str]) -> str:
+    """명시한 feat_csv가 없으면 plan 주변/관용 경로에서 자동 탐색."""
+    if feat_csv and os.path.exists(feat_csv):
+        return feat_csv
+    cands = []
+    if plan_path:
+        plan_dir = os.path.dirname(os.path.abspath(plan_path))
+        cands += [
+            os.path.join(plan_dir, "feat.csv"),
+            os.path.join(plan_dir, "..", "feat.csv"),
+        ]
+    cands += [
+        "./outputs/outputs/feat.csv",
+        "./outputs/feat.csv",
+        "./data/feat.csv",
+    ]
+    for p in cands:
+        if os.path.exists(p):
+            print(f"[DEBUG] auto-picked feat.csv -> {p}")
+            return p
+    print("[DEBUG] feat.csv not found in common locations:", cands)
+    return "" 
 # =========================================================
 # 5) 메인 엔드포인트
 # =========================================================
@@ -939,7 +986,7 @@ def build_report_with_llm(
     plan_csv: str = "",
     forecast_csv: str = "",
     metrics_csv: str = "",
-    # 신규: 복수 시나리오 입력
+    # 복수 시나리오 입력
     plan_csvs: Optional[List[str]] = None,
     scenario_names: Optional[List[str]] = None,
     model_name: str = "gpt-4o-mini",
@@ -962,7 +1009,6 @@ def build_report_with_llm(
         plans = []
 
     plans_summary = summarize_plans(plans, names=scenario_names) if plans else {"scenarios": []}
-    # summary 수준에서 공통/대표 KPI도 뽑아 LLM에 넘기기 쉽도록(첫 시나리오 기준)
     rep_sum = plans_summary["scenarios"][0]["summary"] if plans_summary["scenarios"] else {}
 
     # ----- Metrics / Forecast
@@ -970,7 +1016,9 @@ def build_report_with_llm(
     forecast_sum = summarize_forecast_by_product(forecast_csv) if forecast_csv else {}
 
     product_summary = summarize_by_product(plans[0]) if plans else {}
-    cluster_summary = summarize_cluster_kpi(plans[0], "./data/feat.csv")
+    feat_path = _autoresolve_feat_path(feat_csv, plans[0] if plans else None)
+    cluster_summary = summarize_cluster_kpi(plans[0], feat_path) if (plans and feat_path) else {"missing": True, "reason": "feat path unresolved"}
+    print("[DEBUG] cluster_summary.flags:", {k: cluster_summary.get(k) for k in ["missing","schema_error","reason"]})
 
     facts = {
         "plan_scenarios": plans_summary,     # 다중 시나리오 KPI + Pareto
@@ -980,8 +1028,9 @@ def build_report_with_llm(
         "product_summary": product_summary,
         "cluster_summary": cluster_summary,
     }
+    facts["rule_based_actions"] = generate_rule_based_actions(facts)
+    print("[DEBUG] actions:", facts.get("rule_based_actions"))
 
-    # ----- 샘플 미리보기
     samples = []
     if plans:
         # 시나리오별 샘플 헤드
@@ -1023,7 +1072,6 @@ def build_report_with_llm(
     if js is not None:
         verification = verify_report(js, facts, cfg)
         if auto_regen_on_fail and not verification["ok"]:
-            # 재생성: 문제 리스트를 추가 요구로 전달
             reflect_user = HumanMessage(content=(
                 USER_TASK.format(
                     facts_json=json.dumps(facts, ensure_ascii=False, indent=2),
@@ -1035,7 +1083,6 @@ def build_report_with_llm(
             ))
             raw2 = _call_llm([sys, reflect_user], cfg)
             js2, md2 = _split_json_markdown(raw2)
-            # 2차 결과로 교체
             raw, js, md = raw2, js2, md2
             regen = True
             # 최종 1회 재검증(보고만)
@@ -1047,7 +1094,7 @@ from pathlib import Path
 
 def _ensure_parent_dir(path: str):
     p = Path(path)
-    if p.parent:  # 빈 문자열 대비
+    if p.parent: 
         p.parent.mkdir(parents=True, exist_ok=True)
 
 # =========================================================
@@ -1088,16 +1135,13 @@ def main():
         auto_regen_on_fail=not args.no_regen
     )
     md = out.get("markdown") or ""
-    ps = out.get("json")  # 필요 없으면 생략
+    ps = out.get("json")  
 
-    # 규칙기반 제품별 표 덧붙이기
     try:
-        psum = out and "product_summary"  # build_report_with_llm에서 facts만 있고 out에는 없음
+        psum = out and "product_summary"  
     except:
         psum = None
 
-    # facts를 다시 계산해서 붙이고 싶다면:
-    # (간단히 재사용)
     facts = {
         "plan_scenarios": summarize_plans([args.plan]) if args.plan else {"scenarios":[]},
         "product_summary": summarize_by_product(args.plan) if args.plan else {},
@@ -1112,14 +1156,10 @@ def main():
             md += "| " + " | ".join([f"{r[c]}" for c in dfp.columns]) + " |\n"
 
     # 저장
-    # with open(args.out_md, "w", encoding="utf-8") as f:
-    #     f.write(md)
-
-    # 저장
     if out.get("markdown"):
         _ensure_parent_dir(args.out_md)
         with open(args.out_md, "w", encoding="utf-8") as f:
-            f.write(out["markdown"])
+            f.write(md)
 
     if out.get("json") is not None:
         _ensure_parent_dir(args.out_json)
