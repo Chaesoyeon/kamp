@@ -18,7 +18,6 @@ from ortools.sat.python import cp_model
 import re
 
 def _sort_horizons_kor(hs: List[str]) -> List[str]:
-    """['T일 예상 수주량', 'T+1일 예상 수주량', ...] 순서로 정렬."""
     def key(h: str) -> int:
         s = str(h)
         if s.startswith("T일"):  # 'T일 예상 수주량'
@@ -75,7 +74,6 @@ def load_cluster_info(feat_file: str) -> Dict[str, int]:
     return m.set_index("Product_Number")["Cluster"].to_dict()
 
 def detect_horizons(df: pd.DataFrame) -> List[str]:
-    """T, T+1, ... 혹은 'T일 예상 수주량' 같은 열명을 자동 감지."""
     candidates = []
     for c in df.columns:
         cc = _normalize_col(c)
