@@ -158,6 +158,7 @@ def optimize_plan(
     weight_map = weight_map or {0: 5.0, 1: 2.0, 2: 0.5, 3: 1.0}
 
     df = preprocess_forecast(forecast_by_product)
+    df[prod_col] = df[prod_col].astype(str).str.replace(r"\.0$", "", regex=True)
     model = cp_model.CpModel()
 
     # ----- 데이터 준비 -----
